@@ -484,6 +484,16 @@ function App() {
       </div>
 
       <section className="extractor-hero">
+        <div className="hero-orbit" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="energy-ribbons" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
         <p className="eyebrow">Utility bill intelligence</p>
         <h1>usage extractor</h1>
         <p>
@@ -647,6 +657,12 @@ function BillAnalyzer({
 
       <div className="bill-grid">
         <label className="upload-zone">
+          <span className="scan-line" aria-hidden="true" />
+          <span className="upload-sparks" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
           <input
             accept=".pdf,.txt,.csv,.text,application/pdf"
             aria-label="Upload utility bill PDF or text file"
