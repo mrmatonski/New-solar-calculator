@@ -1,44 +1,48 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import './App.css'
 
 let pdfJsLoader
 
-const currency = new Intl.NumberFormat('en-US', {
+const preciseCurrency = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
-  maximumFractionDigits: 0,
+  maximumFractionDigits: 2,
+  minimumFractionDigits: 2,
 })
 
 const number = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 0,
 })
 
-const presets = [
-  {
-    name: 'Conservative',
-    bill: 210,
-    solar: 175,
-    increase: 4,
-    battery: 0,
-    taxCredit: 30,
-  },
-  {
-    name: 'Typical family',
-    bill: 285,
-    solar: 195,
-    increase: 6,
-    battery: 35,
-    taxCredit: 30,
-  },
-  {
-    name: 'High usage',
-    bill: 420,
-    solar: 260,
-    increase: 7,
-    battery: 55,
-    taxCredit: 30,
-  },
-]
+const monthPattern =
+  '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+
+const monthLabels = {
+  apr: 'Apr',
+  april: 'Apr',
+  aug: 'Aug',
+  august: 'Aug',
+  dec: 'Dec',
+  december: 'Dec',
+  feb: 'Feb',
+  february: 'Feb',
+  jan: 'Jan',
+  january: 'Jan',
+  jul: 'Jul',
+  july: 'Jul',
+  jun: 'Jun',
+  june: 'Jun',
+  mar: 'Mar',
+  march: 'Mar',
+  may: 'May',
+  nov: 'Nov',
+  november: 'Nov',
+  oct: 'Oct',
+  october: 'Oct',
+  sep: 'Sep',
+  sept: 'Sep',
+  september: 'Sep',
+}
 
 function getInitialTheme() {
   if (typeof window === 'undefined') {
@@ -54,56 +58,196 @@ function getInitialTheme() {
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
 }
 
-function clamp(value, min, max) {
-  return Math.min(Math.max(Number(value) || 0, min), max)
+function parseKwhValue(value) {
+  return Number(value.replace(/,/g, ''))
 }
 
-function getAdvisorReply(prompt, model, inputs) {
-  const message = prompt.toLowerCase()
-  const breakEvenText =
-    model.breakEven === undefined ? 'not within 25 years' : `around year ${model.breakEven}`
-  const annualUsage = inputs.billAnalysis?.annualKwh
+function getMonthLabel(value) {
+  const key = value.toLowerCase()
 
-  if (message.includes('usage') || message.includes('kwh') || message.includes('power')) {
-    if (annualUsage) {
-      return `The uploaded bill points to about ${number.format(annualUsage)} kWh per year. That is the strongest utility-backed number to lead with because it comes from the customer's actual bill history, not a generic average.`
+  return monthLabels[key] || key.slice(0, 3)
+}
+
+function getPlausibleKwhValues(text, allowBareNumbers = false) {
+  const values = [...text.matchAll(/(-?[\d,]+(?:\.\d+)?)\s*(?:kwh|kw-hours|kilowatt-hours)/gi)].map((match) =>
+    parseKwhValue(match[1]),
+  )
+
+  if (!values.length && allowBareNumbers && /kwh|usage|net|delivered|used|consumption/i.test(text)) {
+    return [...text.matchAll(/(?<![$\d.])-?[\d,]+(?:\.\d+)?(?!\s*(?:days?|%|¢|cents?))/gi)]
+      .map((match) => parseKwhValue(match[0]))
+      .filter((value) => Math.abs(value) >= 20 && Math.abs(value) <= 5000)
+  }
+
+  return values.filter((value) => Math.abs(value) >= 20 && Math.abs(value) <= 5000)
+}
+
+function extractMonthlyUsage(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  const rows = []
+
+  for (const line of lines) {
+    const monthMatches = [...line.matchAll(new RegExp(monthPattern, 'gi'))]
+
+    if (!monthMatches.length || /rate|price|charge|amount|due|payment|\$/i.test(line)) {
+      continue
     }
 
-    return 'I do not have an annual kWh number yet. Upload a text-based PDF utility bill or paste the usage history, and I will pull the annual power usage into the estimate.'
+    if (monthMatches.length === 1) {
+      const values = getPlausibleKwhValues(line, true)
+
+      if (!values.length) {
+        continue
+      }
+
+      const rawMonth = monthMatches[0][1]
+
+      rows.push({
+        label: getMonthLabel(rawMonth),
+        netKwh: line.toLowerCase().includes('net') ? values.at(-1) : values[0],
+      })
+    }
+
+    if (monthMatches.length > 1) {
+      for (let index = 0; index < monthMatches.length; index += 1) {
+        const current = monthMatches[index]
+        const next = monthMatches[index + 1]
+        const segment = line.slice(current.index, next?.index)
+        const values = getPlausibleKwhValues(segment, true)
+
+        if (values.length) {
+          rows.push({
+            label: getMonthLabel(current[1]),
+            netKwh: segment.toLowerCase().includes('net') ? values.at(-1) : values[0],
+          })
+        }
+      }
+    }
   }
 
-  if (message.includes('battery')) {
-    return `With the current setup, battery backup adds ${currency.format(inputs.batteryPayment)} per month and brings the fixed solar estimate to ${currency.format(model.solarMonthly)}/mo. I would frame it as resilience first: backup power, more control, and still a 25-year projected savings story of ${currency.format(model.lifetime.cumulativeSavings)}.`
+  if (rows.length < 6) {
+    const monthBlockRows = extractFlattenedMonthBlock(text)
+
+    rows.push(...monthBlockRows)
   }
 
-  if (message.includes('payback') || message.includes('break') || message.includes('even')) {
-    return `The current estimate reaches break-even ${breakEvenText}. Through year ${inputs.selectedYear}, projected cumulative savings are ${currency.format(model.current.cumulativeSavings)}. If the customer wants faster payback, lower the solar payment, increase the utility bill assumption, or model a higher utility rate increase.`
+  const uniqueRows = []
+  const seenLabels = new Map()
+
+  for (const row of rows) {
+    const key = row.label
+    seenLabels.set(key, row)
   }
 
-  if (message.includes('sell') || message.includes('pitch') || message.includes('explain')) {
-    return `Try this: "Your utility bill can keep rising, but this solar estimate gives you a predictable ${currency.format(model.solarMonthly)}/mo plan. By year ${inputs.selectedYear}, the model shows ${currency.format(model.current.cumulativeSavings)} in projected savings, and over 25 years that grows to ${currency.format(model.lifetime.cumulativeSavings)}."`
+  for (const row of rows) {
+    if (seenLabels.get(row.label) === row) {
+      uniqueRows.push(row)
+    }
   }
 
-  if (message.includes('environment') || message.includes('carbon') || message.includes('tree')) {
-    return `The environmental angle is strong here: this model estimates about ${number.format(model.co2Tons)} tons of CO2 avoided over 25 years, roughly comparable to ${number.format(model.trees)} trees. I would use that after the money story, not before it.`
+  return uniqueRows.slice(0, 12)
+}
+
+function extractFlattenedMonthBlock(text) {
+  const normalized = text.replace(/\s+/g, ' ')
+  const monthMatches = [...normalized.matchAll(new RegExp(monthPattern, 'gi'))]
+
+  for (let start = 0; start < monthMatches.length; start += 1) {
+    const candidates = monthMatches.slice(start, start + 12)
+    const distinctLabels = [...new Set(candidates.map((match) => getMonthLabel(match[1])))]
+
+    if (distinctLabels.length < 6) {
+      continue
+    }
+
+    const firstIndex = candidates[0].index
+    const lastIndex = candidates.at(-1).index
+
+    if (lastIndex - firstIndex > 360) {
+      continue
+    }
+
+    const afterMonths = normalized.slice(lastIndex, lastIndex + 1000)
+    const values = getPlausibleKwhValues(afterMonths, true).slice(0, distinctLabels.length)
+
+    if (values.length >= 6) {
+      return distinctLabels.slice(0, values.length).map((label, index) => ({
+        label,
+        netKwh: values[index],
+      }))
+    }
   }
 
-  if (message.includes('year') || message.includes('savings') || message.includes('save')) {
-    return `At year ${inputs.selectedYear}, utility is projected at ${currency.format(model.current.utilityAnnual)} for that year versus ${currency.format(model.current.solarAnnual)} for solar. The year-${inputs.selectedYear} annual difference is ${currency.format(model.current.annualSavings)}, and cumulative projected savings are ${currency.format(model.current.cumulativeSavings)}.`
+  return []
+}
+
+function buildFallbackMonths(kwhValues) {
+  const monthlyValues = kwhValues.filter((value) => Math.abs(value) >= 50 && Math.abs(value) <= 5000)
+
+  if (monthlyValues.length < 6) {
+    return []
   }
 
-  return `Here is the quick read: current utility bill is ${currency.format(inputs.monthlyBill)}/mo, solar plus battery is ${currency.format(model.solarMonthly)}/mo, break-even is ${breakEvenText}, and 25-year projected savings are ${currency.format(model.lifetime.cumulativeSavings)}. Ask me about payback, battery, environmental impact, or how to pitch this to a homeowner.`
+  return monthlyValues.slice(0, 12).map((value, index) => ({
+    label: `Month ${index + 1}`,
+    netKwh: value,
+  }))
+}
+
+function getAdvisorReply(prompt, analysis) {
+  const message = prompt.toLowerCase()
+
+  if (!analysis?.annualKwh) {
+    return 'Upload a text-based PDF utility bill or paste the usage-history section first. Once I can see the kWh values, I will summarize annual net usage, high-use months, and whether the bill has enough detail for a solar sizing conversation.'
+  }
+
+  const peakMonth = analysis.months.length
+    ? analysis.months.reduce(
+        (peak, month) => (Math.abs(month.netKwh) > Math.abs(peak.netKwh) ? month : peak),
+        analysis.months[0],
+      )
+    : null
+  const averageMonthly = analysis.months.length ? analysis.annualKwh / analysis.months.length : 0
+
+  if (message.includes('net') || message.includes('usage') || message.includes('kwh')) {
+    if (!peakMonth) {
+      return `This bill shows ${number.format(analysis.annualKwh)} kWh of annual net usage, but I did not find a full month-by-month table. Paste the usage history section if you want the 12-month breakdown.`
+    }
+
+    return `This bill shows ${number.format(analysis.annualKwh)} kWh of 12-month net usage. The average is about ${number.format(averageMonthly)} kWh per month, and the biggest month I found is ${peakMonth.label} at ${number.format(peakMonth.netKwh)} kWh.`
+  }
+
+  if (message.includes('month') || message.includes('breakdown')) {
+    return `I found ${analysis.months.length} monthly usage rows. Use the 12-month breakdown to spot seasonal load: higher summer numbers usually point to cooling, and higher winter numbers usually point to heat, hot water, or electric appliances.`
+  }
+
+  if (message.includes('solar') || message.includes('size')) {
+    return `For a solar conversation, lead with actual usage: ${number.format(analysis.annualKwh)} kWh per year from the utility bill. That annual number is the clean starting point before roof, shading, battery, or financing details.`
+  }
+
+  if (message.includes('rate') || message.includes('price') || message.includes('cost')) {
+    if (analysis.pricePerKwh) {
+      return `The bill works out to ${preciseCurrency.format(analysis.pricePerKwh)} per kWh paid. I calculated that by dividing ${preciseCurrency.format(analysis.totalElectricCharges)} in electric charges by ${number.format(Math.abs(analysis.usageForRate))} kWh of usage.`
+    }
+
+    return 'I could not calculate price per kWh yet. I need both total electric charges and kWh usage from the bill.'
+  }
+
+  return `Quick read: ${number.format(analysis.annualKwh)} kWh annual net usage, ${analysis.months.length} usage rows found, and parsing confidence is ${analysis.confidenceLabel.toLowerCase()}. Ask me about net usage, the month-by-month breakdown, or solar sizing.`
 }
 
 function parseBillText(text) {
   const normalized = text.replace(/\s+/g, ' ')
-  const kwhMatches = [...normalized.matchAll(/([\d,]+(?:\.\d+)?)\s*(?:kwh|kw-hours|kilowatt-hours)/gi)]
+  const kwhMatches = [...normalized.matchAll(/(-?[\d,]+(?:\.\d+)?)\s*(?:kwh|kw-hours|kilowatt-hours)/gi)]
   const annualKwhMatches = [
     ...normalized.matchAll(
-      /(?:annual|yearly|12\s*month|last\s*12\s*months|past\s*12\s*months|usage\s*history)[^\d]{0,80}([\d,]+(?:\.\d+)?)\s*(?:kwh|kw-hours|kilowatt-hours)/gi,
+      /(?:annual|yearly|12\s*month|last\s*12\s*months|past\s*12\s*months|usage\s*history|net\s*usage)[^\d-]{0,80}(-?[\d,]+(?:\.\d+)?)\s*(?:kwh|kw-hours|kilowatt-hours)/gi,
     ),
     ...normalized.matchAll(
-      /([\d,]+(?:\.\d+)?)\s*(?:kwh|kw-hours|kilowatt-hours)[^a-z0-9]{0,40}(?:annual|yearly|12\s*month|last\s*12\s*months|past\s*12\s*months)/gi,
+      /(-?[\d,]+(?:\.\d+)?)\s*(?:kwh|kw-hours|kilowatt-hours)[^a-z0-9]{0,50}(?:annual|yearly|12\s*month|last\s*12\s*months|past\s*12\s*months|net\s*usage)/gi,
     ),
   ]
   const dollarMatches = [
@@ -111,40 +255,67 @@ function parseBillText(text) {
       /(?:total amount due|amount due|new charges|current charges|total charges|please pay|balance due)[^\d$]{0,40}\$?\s*([\d,]+(?:\.\d{1,2})?)/gi,
     ),
   ]
+  const electricChargeMatches = [
+    ...normalized.matchAll(
+      /(?:total\s+electric\s+charges?|electric\s+charges?|electricity\s+charges?|energy\s+charges?|delivery\s+and\s+supply|supply\s+charges?|generation\s+charges?)[^\d$]{0,60}\$?\s*([\d,]+(?:\.\d{1,2})?)/gi,
+    ),
+  ]
   const fallbackDollars = [...normalized.matchAll(/\$\s*([\d,]+(?:\.\d{1,2})?)/g)]
-
-  const kwhValues = kwhMatches.map((match) => Number(match[1].replace(/,/g, '')))
-  const monthlyCandidates = kwhValues.filter((value) => value >= 50 && value <= 5000)
+  const kwhValues = kwhMatches.map((match) => parseKwhValue(match[1]))
+  const detectedMonths = extractMonthlyUsage(text)
+  const months = detectedMonths.length >= 6 ? detectedMonths : buildFallbackMonths(kwhValues)
+  const monthSource =
+    detectedMonths.length >= 6
+      ? 'usage table'
+      : months.length >= 6
+        ? 'fallback kWh sequence'
+        : 'not found'
   const annualValues = annualKwhMatches
-    .map((match) => Number(match[1].replace(/,/g, '')))
-    .filter((value) => value >= 600 && value <= 100000)
+    .map((match) => parseKwhValue(match[1]))
+    .filter((value) => Math.abs(value) >= 600 && Math.abs(value) <= 100000)
   const dollarValues = dollarMatches.length
     ? dollarMatches.map((match) => Number(match[1].replace(/,/g, '')))
     : fallbackDollars.map((match) => Number(match[1].replace(/,/g, '')))
-
-  const explicitAnnualKwh = annualValues.length ? Math.max(...annualValues) : null
-  const historyMonths = monthlyCandidates.slice(0, 12)
-  const annualFromHistory =
-    historyMonths.length >= 6 ? historyMonths.reduce((total, value) => total + value, 0) : null
-  const monthlyKwh = monthlyCandidates.length ? Math.max(...monthlyCandidates) : null
+  const electricChargeValues = electricChargeMatches.map((match) => Number(match[1].replace(/,/g, '')))
+  const explicitAnnualKwh = annualValues.length
+    ? annualValues.reduce((largest, value) => (Math.abs(value) > Math.abs(largest) ? value : largest), 0)
+    : null
+  const annualFromMonths = months.length ? months.reduce((total, month) => total + month.netKwh, 0) : null
+  const monthlyKwh = months.length
+    ? annualFromMonths / months.length
+    : kwhValues.find((value) => Math.abs(value) >= 50 && Math.abs(value) <= 5000) || null
   const billAmount = dollarValues.length ? Math.max(...dollarValues.filter((value) => value < 5000)) : null
-  const rate = monthlyKwh && billAmount ? billAmount / monthlyKwh : null
-  const annualKwh = explicitAnnualKwh || annualFromHistory || (monthlyKwh ? monthlyKwh * 12 : null)
-  const usageBasis = explicitAnnualKwh
-    ? 'Found annual utility usage'
-    : annualFromHistory
-      ? `Summed ${historyMonths.length} months of utility history`
-      : monthlyKwh
-        ? 'Annualized current bill usage'
-        : 'No usage found'
-  const confidence = [monthlyKwh, billAmount, rate, annualKwh].filter(Boolean).length
+  const usableElectricCharges = electricChargeValues.filter((value) => value > 0 && value < 5000)
+  const totalElectricCharges = usableElectricCharges.length ? Math.max(...usableElectricCharges) : billAmount
+  const annualKwh = annualFromMonths || explicitAnnualKwh || (monthlyKwh ? monthlyKwh * 12 : null)
+  const usageForRate = monthlyKwh || null
+  const pricePerKwh =
+    usageForRate && totalElectricCharges ? totalElectricCharges / Math.abs(usageForRate) : null
+  const usageBasis = months.length >= 12
+    ? `Found 12 monthly rows from ${monthSource}`
+    : months.length >= 6
+      ? `Found ${months.length} monthly rows from ${monthSource}`
+      : explicitAnnualKwh
+        ? 'Found annual net usage'
+        : monthlyKwh
+          ? 'Annualized current bill usage'
+          : 'No usage found'
+  const confidence = [months.length >= 6, annualKwh, totalElectricCharges, pricePerKwh].filter(Boolean).length
+  const confidenceLabel = ['Waiting for bill', 'Low confidence', 'Good confidence', 'High confidence', 'Excellent confidence'][
+    confidence
+  ]
 
   return {
     annualKwh,
     billAmount,
     confidence,
+    confidenceLabel,
+    monthSource,
     monthlyKwh,
-    rate,
+    months,
+    pricePerKwh,
+    totalElectricCharges,
+    usageForRate,
     usageBasis,
   }
 }
@@ -168,7 +339,30 @@ async function extractPdfText(file) {
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber)
     const content = await page.getTextContent()
-    pageText.push(content.items.map((item) => item.str).join(' '))
+    const lines = new Map()
+
+    for (const item of content.items) {
+      const [, , , , x, y] = item.transform
+      const lineKey = Math.round(y / 3) * 3
+      const existing = lines.get(lineKey) || []
+
+      existing.push({ text: item.str, x })
+      lines.set(lineKey, existing)
+    }
+
+    const sortedLines = [...lines.entries()]
+      .sort(([lineA], [lineB]) => lineB - lineA)
+      .map(([, items]) =>
+        items
+          .sort((itemA, itemB) => itemA.x - itemB.x)
+          .map((item) => item.text)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      )
+      .filter(Boolean)
+
+    pageText.push(sortedLines.join('\n'))
   }
 
   return pageText.join('\n')
@@ -186,18 +380,12 @@ function readTextFile(file) {
 
 function App() {
   const [theme, setTheme] = useState(getInitialTheme)
-  const [monthlyBill, setMonthlyBill] = useState(285)
-  const [solarPayment, setSolarPayment] = useState(195)
-  const [batteryPayment, setBatteryPayment] = useState(35)
-  const [utilityIncrease, setUtilityIncrease] = useState(6)
-  const [taxCredit, setTaxCredit] = useState(30)
-  const [selectedYear, setSelectedYear] = useState(12)
   const [chatOpen, setChatOpen] = useState(true)
   const [chatDraft, setChatDraft] = useState('')
   const [chatMessages, setChatMessages] = useState([
     {
       role: 'assistant',
-      text: 'Hi, I am your solar savings advisor. Ask me how to explain the numbers, handle payback questions, or pitch battery backup.',
+      text: 'Hi, I am your usage assistant. Upload a bill and I can explain the 12-month net usage, peak months, and what the utility data means.',
     },
   ])
   const [billText, setBillText] = useState('')
@@ -212,63 +400,6 @@ function App() {
     window.localStorage.setItem('sunrun-theme', theme)
   }, [theme])
 
-  const model = useMemo(() => {
-    const solarMonthly = solarPayment + batteryPayment
-    const years = Array.from({ length: 26 }, (_, year) => {
-      const utilityAnnual = monthlyBill * 12 * (1 + utilityIncrease / 100) ** year
-      const solarAnnual = solarMonthly * 12
-      const annualSavings = utilityAnnual - solarAnnual
-
-      return {
-        year,
-        utilityAnnual,
-        solarAnnual,
-        annualSavings,
-      }
-    })
-
-    let cumulativeUtility = 0
-    let cumulativeSolar = 0
-    const cumulative = years.map((item) => {
-      cumulativeUtility += item.utilityAnnual
-      cumulativeSolar += item.solarAnnual
-      const savingsBeforeCredit = cumulativeUtility - cumulativeSolar
-      const creditValue = solarMonthly * 12 * (taxCredit / 100)
-
-      return {
-        ...item,
-        cumulativeUtility,
-        cumulativeSolar,
-        cumulativeSavings: savingsBeforeCredit + creditValue,
-      }
-    })
-
-    const current = cumulative[selectedYear]
-    const lifetime = cumulative.at(-1)
-    const breakEven = cumulative.find((item) => item.cumulativeSavings > 0)?.year
-    const co2Tons = Math.round(6.8 * 25)
-    const trees = Math.round(co2Tons * 16.5)
-
-    return {
-      solarMonthly,
-      years: cumulative,
-      current,
-      lifetime,
-      breakEven,
-      co2Tons,
-      trees,
-      firstYearSavings: cumulative[0].annualSavings,
-    }
-  }, [batteryPayment, monthlyBill, selectedYear, solarPayment, taxCredit, utilityIncrease])
-
-  const applyPreset = (preset) => {
-    setMonthlyBill(preset.bill)
-    setSolarPayment(preset.solar)
-    setBatteryPayment(preset.battery)
-    setUtilityIncrease(preset.increase)
-    setTaxCredit(preset.taxCredit)
-  }
-
   const askAdvisor = (prompt) => {
     const cleanPrompt = prompt.trim()
 
@@ -276,12 +407,7 @@ function App() {
       return
     }
 
-    const reply = getAdvisorReply(cleanPrompt, model, {
-      batteryPayment,
-      billAnalysis,
-      monthlyBill,
-      selectedYear,
-    })
+    const reply = getAdvisorReply(cleanPrompt, billAnalysis)
 
     setChatMessages((messages) => [
       ...messages,
@@ -299,17 +425,12 @@ function App() {
     setBillFileName(fileName)
     setBillAnalysis(analysis)
     setBillSource(source)
-    setBillStatus(analysis.annualKwh ? 'Usage found from the utility bill.' : 'Bill loaded. Usage was not found yet.')
+    setBillStatus(
+      analysis.annualKwh
+        ? 'Usage extracted from the utility bill.'
+        : 'Bill loaded. I could not find utility usage yet.',
+    )
     setBillError('')
-
-    if (analysis.billAmount) {
-      setMonthlyBill(clamp(Math.round(analysis.billAmount), 80, 800))
-    }
-
-    if (analysis.monthlyKwh && analysis.billAmount) {
-      const estimatedSolar = Math.round(Math.max(95, Math.min(650, analysis.billAmount * 0.72)))
-      setSolarPayment(estimatedSolar)
-    }
   }
 
   const handleBillUpload = async (event) => {
@@ -345,9 +466,9 @@ function App() {
   }
 
   return (
-    <main className={`app ${isLightMode ? 'light' : 'dark'}`}>
+    <main className={`app extractor-app ${isLightMode ? 'light' : 'dark'}`}>
       <div className="topbar">
-        <span>Solar savings workspace</span>
+        <span>Usage extractor</span>
         <button
           aria-label={`Switch to ${isLightMode ? 'dark' : 'light'} mode`}
           aria-pressed={isLightMode}
@@ -362,42 +483,13 @@ function App() {
         </button>
       </div>
 
-      <section className="hero">
-        <div className="hero-copy">
-          <p className="eyebrow">SunRun savings simulator</p>
-          <h1>Show homeowners the moment solar starts winning.</h1>
-          <p>
-            Compare rising utility bills against a fixed solar plan, model battery backup,
-            estimate lifetime savings, and give customers a clean story they can understand
-            in seconds.
-          </p>
-          <div className="hero-actions">
-            <a href="#calculator" className="button primary">
-              Build estimate
-            </a>
-            <a href="#results" className="button secondary">
-              View results
-            </a>
-          </div>
-        </div>
-
-        <div className="hero-card">
-          <span>25-year projected savings</span>
-          <strong>{currency.format(model.lifetime.cumulativeSavings)}</strong>
-          <p>
-            Break-even:{' '}
-            {model.breakEven === undefined ? 'not within 25 years' : `year ${model.breakEven}`}
-          </p>
-        </div>
-      </section>
-
-      <section className="preset-row" aria-label="Estimate presets">
-        {presets.map((preset) => (
-          <button type="button" key={preset.name} onClick={() => applyPreset(preset)}>
-            <span>{preset.name}</span>
-            <strong>{currency.format(preset.bill)}/mo utility</strong>
-          </button>
-        ))}
+      <section className="extractor-hero">
+        <p className="eyebrow">Utility bill intelligence</p>
+        <h1>usage extractor</h1>
+        <p>
+          Upload a text-based utility PDF or paste bill text to extract 12 months of net kWh usage
+          and turn the utility history into a clean customer-ready summary.
+        </p>
       </section>
 
       <BillAnalyzer
@@ -412,147 +504,8 @@ function App() {
         onUpload={handleBillUpload}
       />
 
-      <section className="calculator" id="calculator">
-        <div className="panel controls">
-          <div className="section-title">
-            <p className="eyebrow">Customer inputs</p>
-            <h2>Tune the estimate live</h2>
-          </div>
-
-          <Control
-            label="Monthly utility bill"
-            value={monthlyBill}
-            min={80}
-            max={800}
-            prefix="$"
-            onChange={(value) => setMonthlyBill(clamp(value, 80, 800))}
-          />
-          <Control
-            label="Monthly solar payment"
-            value={solarPayment}
-            min={75}
-            max={650}
-            prefix="$"
-            onChange={(value) => setSolarPayment(clamp(value, 75, 650))}
-          />
-          <Control
-            label="Battery backup add-on"
-            value={batteryPayment}
-            min={0}
-            max={200}
-            prefix="$"
-            onChange={(value) => setBatteryPayment(clamp(value, 0, 200))}
-          />
-          <Control
-            label="Annual utility rate increase"
-            value={utilityIncrease}
-            min={0}
-            max={12}
-            suffix="%"
-            onChange={(value) => setUtilityIncrease(clamp(value, 0, 12))}
-          />
-          <Control
-            label="Incentive / tax credit estimate"
-            value={taxCredit}
-            min={0}
-            max={40}
-            suffix="%"
-            onChange={(value) => setTaxCredit(clamp(value, 0, 40))}
-          />
-        </div>
-
-        <div className="panel year-panel">
-          <div className="section-title">
-            <p className="eyebrow">Time machine</p>
-            <h2>Year {selectedYear}</h2>
-          </div>
-          <input
-            aria-label="Select projection year"
-            type="range"
-            min="0"
-            max="25"
-            value={selectedYear}
-            onChange={(event) => setSelectedYear(Number(event.target.value))}
-          />
-          <div className="ticks">
-            <span>Today</span>
-            <span>5y</span>
-            <span>10y</span>
-            <span>15y</span>
-            <span>20y</span>
-            <span>25y</span>
-          </div>
-          <div className="mini-grid">
-            <Metric label="Utility that year" value={currency.format(model.current.utilityAnnual)} />
-            <Metric label="Solar that year" value={currency.format(model.current.solarAnnual)} />
-            <Metric label="Annual delta" value={currency.format(model.current.annualSavings)} />
-          </div>
-        </div>
-      </section>
-
-      <section className="results" id="results">
-        <div className="result-card utility-card">
-          <p>Projected utility cost</p>
-          <strong>{currency.format(model.current.cumulativeUtility)}</strong>
-          <span>Through year {selectedYear}</span>
-        </div>
-        <div className="result-card solar-card">
-          <p>Projected solar cost</p>
-          <strong>{currency.format(model.current.cumulativeSolar)}</strong>
-          <span>{currency.format(model.solarMonthly)}/mo fixed estimate</span>
-        </div>
-        <div className="result-card savings-card">
-          <p>Total projected savings</p>
-          <strong>{currency.format(model.current.cumulativeSavings)}</strong>
-          <span>Includes modeled incentive value</span>
-        </div>
-      </section>
-
-      <section className="panel chart-panel">
-        <div className="section-title">
-          <p className="eyebrow">25-year cost curve</p>
-          <h2>Where the utility bill runs away</h2>
-        </div>
-        <div className="bars" aria-label="25-year utility and solar cost chart">
-          {model.years.filter((item) => item.year % 5 === 0).map((item) => {
-            const max = model.lifetime.cumulativeUtility
-            const utilityHeight = `${Math.max(8, (item.cumulativeUtility / max) * 100)}%`
-            const solarHeight = `${Math.max(8, (item.cumulativeSolar / max) * 100)}%`
-
-            return (
-              <div className="bar-group" key={item.year}>
-                <div className="bar-stack">
-                  <span className="bar utility-bar" style={{ height: utilityHeight }} />
-                  <span className="bar solar-bar" style={{ height: solarHeight }} />
-                </div>
-                <p>Y{item.year}</p>
-              </div>
-            )
-          })}
-        </div>
-      </section>
-
-      <section className="insights">
-        <article>
-          <span>Payback signal</span>
-          <strong>
-            {model.breakEven === undefined ? 'Needs adjustment' : `Year ${model.breakEven}`}
-          </strong>
-          <p>Estimated point where cumulative solar savings turn positive.</p>
-        </article>
-        <article>
-          <span>Carbon impact</span>
-          <strong>{number.format(model.co2Tons)} tons</strong>
-          <p>Estimated CO2 avoided across 25 years of residential solar production.</p>
-        </article>
-        <article>
-          <span>Tree equivalent</span>
-          <strong>{number.format(model.trees)}</strong>
-          <p>A simple visual comparison customers can remember after the appointment.</p>
-        </article>
-      </section>
-
       <SolarAdvisor
+        analysis={billAnalysis}
         chatDraft={chatDraft}
         chatMessages={chatMessages}
         chatOpen={chatOpen}
@@ -561,32 +514,6 @@ function App() {
         onToggle={() => setChatOpen((isOpen) => !isOpen)}
       />
     </main>
-  )
-}
-
-function Control({ label, value, min, max, prefix = '', suffix = '', onChange }) {
-  return (
-    <label className="control">
-      <span>{label}</span>
-      <div className="input-wrap">
-        {prefix && <small>{prefix}</small>}
-        <input
-          type="number"
-          min={min}
-          max={max}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        />
-        {suffix && <small>{suffix}</small>}
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
   )
 }
 
@@ -599,28 +526,62 @@ function Metric({ label, value }) {
   )
 }
 
-function SolarAdvisor({ chatDraft, chatMessages, chatOpen, onAsk, onDraftChange, onToggle }) {
+function MonthlyBreakdown({ months }) {
+  if (!months.length) {
+    return (
+      <div className="empty-breakdown">
+        <strong>No 12-month table found yet</strong>
+        <span>Upload a bill with a usage history table, or paste the utility usage section.</span>
+      </div>
+    )
+  }
+
+  const maxUsage = Math.max(...months.map((month) => Math.abs(month.netKwh)), 1)
+
+  return (
+    <div className="usage-breakdown">
+      {months.map((month, index) => {
+        const width = `${Math.max(8, (Math.abs(month.netKwh) / maxUsage) * 100)}%`
+
+        return (
+          <div className="usage-row" key={`${month.label}-${index}`}>
+            <span>{month.label}</span>
+            <div className="usage-bar-track">
+              <div
+                className={month.netKwh < 0 ? 'usage-bar exported' : 'usage-bar'}
+                style={{ width }}
+              />
+            </div>
+            <strong>{number.format(month.netKwh)} kWh</strong>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function SolarAdvisor({ analysis, chatDraft, chatMessages, chatOpen, onAsk, onDraftChange, onToggle }) {
   const suggestions = [
-    'How do I pitch this?',
-    'When is payback?',
-    'Explain battery backup',
+    'Summarize net usage',
+    'Explain the monthly breakdown',
+    'Is this enough for solar sizing?',
   ]
 
   return (
-    <aside className={chatOpen ? 'advisor open' : 'advisor'} aria-label="Solar AI advisor">
+    <aside className={chatOpen ? 'advisor open' : 'advisor'} aria-label="Usage AI assistant">
       <button className="advisor-toggle" type="button" onClick={onToggle}>
         <span className="advisor-orb">☀️</span>
-        <span>{chatOpen ? 'Hide AI advisor' : 'Ask AI advisor'}</span>
+        <span>{chatOpen ? 'Hide AI assistant' : 'Ask AI assistant'}</span>
       </button>
 
       {chatOpen && (
         <div className="advisor-window">
           <div className="advisor-header">
             <div>
-              <p className="eyebrow">AI sales copilot</p>
-              <h2>Solar Advisor</h2>
+              <p className="eyebrow">AI usage copilot</p>
+              <h2>Usage Assistant</h2>
             </div>
-            <span className="live-pill">Live estimate</span>
+            <span className="live-pill">{analysis?.annualKwh ? 'Bill loaded' : 'Waiting'}</span>
           </div>
 
           <div className="advisor-messages">
@@ -647,8 +608,8 @@ function SolarAdvisor({ chatDraft, chatMessages, chatOpen, onAsk, onDraftChange,
             }}
           >
             <input
-              aria-label="Ask the solar advisor"
-              placeholder="Ask about savings, payback, battery..."
+              aria-label="Ask the usage assistant"
+              placeholder="Ask about net usage, peak months, or solar sizing..."
               value={chatDraft}
               onChange={(event) => onDraftChange(event.target.value)}
             />
@@ -671,15 +632,17 @@ function BillAnalyzer({
   onBillTextChange,
   onUpload,
 }) {
-  const confidenceLabel = ['Waiting for bill', 'Low confidence', 'Good confidence', 'High confidence'][
-    analysis?.confidence || 0
-  ]
+  const annualUsage = analysis?.annualKwh ? `${number.format(analysis.annualKwh)} kWh/year` : 'Not found'
+  const averageUsage =
+    analysis?.monthlyKwh && analysis.months.length
+      ? `${number.format(analysis.monthlyKwh)} kWh/month`
+      : 'Not found'
 
   return (
-    <section className="panel bill-analyzer">
+    <section className="panel bill-analyzer extractor-panel">
       <div className="section-title">
-        <p className="eyebrow">Bill scanner</p>
-        <h2>Upload a bill and detect usage</h2>
+        <p className="eyebrow">Bill upload</p>
+        <h2>Extract 12-month net usage</h2>
       </div>
 
       <div className="bill-grid">
@@ -691,19 +654,19 @@ function BillAnalyzer({
             onChange={onUpload}
           />
           <span className="upload-icon">📄</span>
-          <strong>Upload PDF bill</strong>
-          <small>Pulls kWh usage from text-based utility PDFs. Scanned image PDFs need OCR first.</small>
+          <strong>Upload utility bill</strong>
+          <small>Text-based PDFs work in-browser. Scanned image PDFs need OCR or pasted text.</small>
         </label>
 
         <div className="bill-text-box">
           <textarea
             aria-label="Paste utility bill text"
-            placeholder="Or paste bill text here, then click Analyze. Example: Last 12 months usage 13,680 kWh, Total Amount Due $285.42..."
+            placeholder="Paste utility bill text here. Include the usage history table when possible: Jan 920 kWh, Feb 840 kWh, Mar 760 kWh..."
             value={billText}
             onChange={(event) => onBillTextChange(event.target.value)}
           />
           <button type="button" onClick={onAnalyzeText}>
-            Analyze bill
+            Analyze usage
           </button>
         </div>
       </div>
@@ -715,26 +678,28 @@ function BillAnalyzer({
         </div>
       )}
 
-      <div className="bill-results">
+      <div className="bill-results extractor-results">
         <Metric label="File" value={billFileName || 'No bill loaded'} />
+        <Metric label="Annual net usage" value={annualUsage} />
+        <Metric label="Average monthly net" value={averageUsage} />
         <Metric
-          label="Annual usage"
-          value={analysis?.annualKwh ? `${number.format(analysis.annualKwh)} kWh/year` : 'Not found'}
+          label="Electric charges"
+          value={analysis?.totalElectricCharges ? preciseCurrency.format(analysis.totalElectricCharges) : 'Not found'}
         />
         <Metric
-          label="Monthly usage"
-          value={analysis?.monthlyKwh ? `${number.format(analysis.monthlyKwh)} kWh` : 'Not found'}
-        />
-        <Metric
-          label="Bill amount"
-          value={analysis?.billAmount ? currency.format(analysis.billAmount) : 'Not found'}
-        />
-        <Metric
-          label="Estimated energy rate"
-          value={analysis?.rate ? `${currency.format(analysis.rate * 100)}/100 kWh` : 'Not found'}
+          label="Price paid per kWh"
+          value={analysis?.pricePerKwh ? `${preciseCurrency.format(analysis.pricePerKwh)}/kWh` : 'Not found'}
         />
         <Metric label="Usage basis" value={analysis?.usageBasis || 'Waiting for bill'} />
-        <Metric label="Parsing confidence" value={confidenceLabel} />
+        <Metric label="Parsing confidence" value={analysis?.confidenceLabel || 'Waiting for bill'} />
+      </div>
+
+      <div className="monthly-panel">
+        <div className="section-title">
+          <p className="eyebrow">12-month net usage</p>
+          <h2>Month-by-month breakdown</h2>
+        </div>
+        <MonthlyBreakdown months={analysis?.months || []} />
       </div>
     </section>
   )
