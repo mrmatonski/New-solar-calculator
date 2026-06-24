@@ -547,6 +547,10 @@ h2 {
   gap: 18px;
 }
 
+.bill-grid.upload-only {
+  grid-template-columns: 1fr;
+}
+
 .upload-zone {
   position: relative;
   overflow: hidden;
@@ -565,6 +569,10 @@ h2 {
     border-color 180ms ease,
     transform 180ms ease,
     box-shadow 180ms ease;
+}
+
+.upload-only .upload-zone {
+  min-height: 320px;
 }
 
 .upload-zone:hover {
@@ -658,43 +666,6 @@ h2 {
   line-height: 1.45;
 }
 
-.bill-text-box {
-  display: grid;
-  gap: 12px;
-}
-
-.bill-text-box textarea {
-  min-height: 196px;
-  resize: vertical;
-  border: 1px solid var(--line);
-  border-radius: 22px;
-  padding: 16px;
-  color: var(--text);
-  background: var(--glass-input);
-  outline: 0;
-  line-height: 1.5;
-}
-
-.bill-text-box textarea:focus {
-  border-color: rgba(255, 209, 102, 0.68);
-}
-
-.bill-text-box button {
-  position: relative;
-  overflow: hidden;
-  min-height: 52px;
-  border: 0;
-  border-radius: 999px;
-  color: #111827;
-  background: linear-gradient(135deg, var(--sun-soft), var(--sun), var(--orange));
-  cursor: pointer;
-  font-weight: 950;
-  transition:
-    box-shadow 180ms ease,
-    transform 180ms ease;
-}
-
-.bill-text-box button::after,
 .advisor-form button::after {
   content: '';
   position: absolute;
@@ -704,7 +675,6 @@ h2 {
   animation: buttonGlint 3.2s ease-in-out infinite;
 }
 
-.bill-text-box button:hover,
 .advisor-form button:hover {
   box-shadow: 0 18px 44px rgba(255, 183, 3, 0.28);
   transform: translateY(-2px);

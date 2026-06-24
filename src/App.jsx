@@ -214,7 +214,7 @@ function getAdvisorReply(prompt, analysis) {
 
   if (message.includes('net') || message.includes('usage') || message.includes('kwh')) {
     if (!peakMonth) {
-      return `This bill shows ${number.format(analysis.annualKwh)} kWh of annual net usage, but I did not find a full month-by-month table. Paste the usage history section if you want the 12-month breakdown.`
+      return `This bill shows ${number.format(analysis.annualKwh)} kWh of annual net usage, but I did not find a full month-by-month table. Try uploading a bill that includes the utility usage history section for the cleanest 12-month breakdown.`
     }
 
     return `This bill shows ${number.format(analysis.annualKwh)} kWh of 12-month net usage. The average is about ${number.format(averageMonthly)} kWh per month, and the biggest month I found is ${peakMonth.label} at ${number.format(peakMonth.netKwh)} kWh.`
@@ -388,7 +388,6 @@ function App() {
       text: 'Hi, I am your usage assistant. Upload a bill and I can explain the 12-month net usage, peak months, and what the utility data means.',
     },
   ])
-  const [billText, setBillText] = useState('')
   const [billFileName, setBillFileName] = useState('')
   const [billAnalysis, setBillAnalysis] = useState(null)
   const [billSource, setBillSource] = useState('')
@@ -421,7 +420,6 @@ function App() {
   const analyzeBill = (text, fileName = '', source = '') => {
     const analysis = parseBillText(text)
 
-    setBillText(text)
     setBillFileName(fileName)
     setBillAnalysis(analysis)
     setBillSource(source)
@@ -508,9 +506,6 @@ function App() {
         billError={billError}
         billSource={billSource}
         billStatus={billStatus}
-        billText={billText}
-        onAnalyzeText={() => analyzeBill(billText, 'Pasted bill text', 'Pasted utility text')}
-        onBillTextChange={setBillText}
         onUpload={handleBillUpload}
       />
 
@@ -637,9 +632,6 @@ function BillAnalyzer({
   billFileName,
   billSource,
   billStatus,
-  billText,
-  onAnalyzeText,
-  onBillTextChange,
   onUpload,
 }) {
   const annualUsage = analysis?.annualKwh ? `${number.format(analysis.annualKwh)} kWh/year` : 'Not found'
@@ -655,7 +647,7 @@ function BillAnalyzer({
         <h2>Extract 12-month net usage</h2>
       </div>
 
-      <div className="bill-grid">
+      <div className="bill-grid upload-only">
         <label className="upload-zone">
           <span className="scan-line" aria-hidden="true" />
           <span className="upload-sparks" aria-hidden="true">
@@ -671,20 +663,8 @@ function BillAnalyzer({
           />
           <span className="upload-icon">📄</span>
           <strong>Upload utility bill</strong>
-          <small>Text-based PDFs work in-browser. Scanned image PDFs need OCR or pasted text.</small>
+          <small>Text-based PDFs work in-browser. Scanned image PDFs need OCR first.</small>
         </label>
-
-        <div className="bill-text-box">
-          <textarea
-            aria-label="Paste utility bill text"
-            placeholder="Paste utility bill text here. Include the usage history table when possible: Jan 920 kWh, Feb 840 kWh, Mar 760 kWh..."
-            value={billText}
-            onChange={(event) => onBillTextChange(event.target.value)}
-          />
-          <button type="button" onClick={onAnalyzeText}>
-            Analyze usage
-          </button>
-        </div>
       </div>
 
       {(billStatus || billError || billSource) && (
